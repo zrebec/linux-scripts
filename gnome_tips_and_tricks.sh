@@ -89,8 +89,8 @@ gsettings set org.gnome.shell.extensions.dash-to-dock show-running true
 
 # === OSTATNÉ UŽITOČNÉ NASTAVENIA ===
 
-# 24. Zmena ikony home folderu
-gsettings set org.gnome.nautilus.icon-view default-zoom-level 'medium'
+# 24. Zmena default veľkosti ikon v Nautilus
+gsettings set org.gnome.nautilus.icon-view default-zoom-level 'large'
 
 # 25. Zapnutie natural scrolling (ako na macOS)
 gsettings set org.gnome.desktop.peripherals.mouse natural-scroll true
