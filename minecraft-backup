@@ -1,0 +1,295 @@
+#!/bin/bash
+# Minecraft Save Backup Script
+# Backup saves from Prism Launcher to zip archives
+
+# Configuration
+SOURCE_DIR="$HOME/.local/share/PrismLauncher/instances/1.21.6/minecraft/saves/Skyblock"
+BACKUP_DIR="$HOME/games/minecraft/backup"
+WORLD_NAME="Skyblock"
+
+# Colors for pretty output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
+RESET='\033[0m'
+
+print_color() {
+    local color=$1
+    local message=$2
+    echo -e "${color}${message}${RESET}"
+}
+
+# Function to create backup
+create_backup() {
+    local custom_name="$1"
+    
+    # Check if source directory exists
+    if [[ ! -d "$SOURCE_DIR" ]]; then
+        print_color $RED "❌ Source directory not found: $SOURCE_DIR"
+        print_color $YELLOW "💡 Make sure Prism Launcher instance exists and has saves"
+        exit 1
+    fi
+    
+    # Create backup directory if it doesn't exist
+    mkdir -p "$BACKUP_DIR"
+    
+    # Generate timestamp
+    local timestamp=$(date +"%Y%m%d_%H%M%S")
+    
+    # Determine backup filename
+    local backup_name
+    if [[ -n "$custom_name" ]]; then
+        backup_name="${WORLD_NAME}_${custom_name}_${timestamp}.zip"
+    else
+        backup_name="${WORLD_NAME}_${timestamp}.zip"
+    fi
+    
+    local backup_path="$BACKUP_DIR/$backup_name"
+    
+    print_color $CYAN "🎮 Creating Minecraft save backup..."
+    print_color $BLUE "📁 Source: $SOURCE_DIR"
+    print_color $BLUE "💾 Backup: $backup_path"
+    print_color $BLUE "⏰ Time: $(date '+%Y-%m-%d %H:%M:%S')"
+    
+    # Check if world is currently being played (look for session.lock)
+    if [[ -f "$SOURCE_DIR/session.lock" ]]; then
+        print_color $YELLOW "⚠️  Warning: World appears to be open in Minecraft!"
+        print_color $YELLOW "   For best results, close Minecraft before backup."
+        read -p "Continue anyway? (y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            print_color $CYAN "Backup cancelled."
+            exit 0
+        fi
+    fi
+    
+    # Create the backup
+    print_color $YELLOW "📦 Creating zip archive..."
+    
+    # Change to parent directory of source to avoid full path in zip
+    local parent_dir=$(dirname "$SOURCE_DIR")
+    local world_folder=$(basename "$SOURCE_DIR")
+    
+    if cd "$parent_dir"; then
+        if zip -r "$backup_path" "$world_folder" -x "*.tmp" "*.lock" > /dev/null 2>&1; then
+            # Get backup size
+            local backup_size=$(du -h "$backup_path" | cut -f1)
+            
+            print_color $GREEN "✅ Backup created successfully!"
+            print_color $WHITE "   📁 File: $backup_name"
+            print_color $WHITE "   📏 Size: $backup_size"
+            print_color $WHITE "   📍 Path: $backup_path"
+            
+            # Show recent backups
+            show_recent_backups
+            
+        else
+            print_color $RED "❌ Failed to create backup!"
+            exit 1
+        fi
+    else
+        print_color $RED "❌ Failed to access source directory!"
+        exit 1
+    fi
+}
+
+# Function to show recent backups
+show_recent_backups() {
+    print_color $CYAN "\n📋 Recent backups:"
+    
+    if [[ ! -d "$BACKUP_DIR" ]]; then
+        print_color $YELLOW "   No backup directory found"
+        return
+    fi
+    
+    # Find and display recent backups (last 5)
+    local count=0
+    find "$BACKUP_DIR" -name "${WORLD_NAME}_*.zip" -type f -printf '%T@ %p\n' | \
+    sort -nr | head -5 | while read timestamp filepath; do
+        local filename=$(basename "$filepath")
+        local filesize=$(du -h "$filepath" | cut -f1)
+        local filedate=$(date -d "@${timestamp}" '+%Y-%m-%d %H:%M')
+        
+        printf "   ${WHITE}%-30s${RESET} ${BLUE}%s${RESET} ${YELLOW}%s${RESET}\n" \
+               "$filename" "$filesize" "$filedate"
+        
+        count=$((count + 1))
+    done
+    
+    # Count total backups
+    local total=$(find "$BACKUP_DIR" -name "${WORLD_NAME}_*.zip" -type f | wc -l)
+    if [[ $total -gt 5 ]]; then
+        print_color $CYAN "   ... and $((total - 5)) more backups"
+    fi
+}
+
+# Function to list all backups
+list_backups() {
+    print_color $CYAN "📋 All ${WORLD_NAME} backups:"
+    
+    if [[ ! -d "$BACKUP_DIR" ]]; then
+        print_color $YELLOW "   No backup directory found"
+        return
+    fi
+    
+    local found=false
+    find "$BACKUP_DIR" -name "${WORLD_NAME}_*.zip" -type f -printf '%T@ %p\n' | \
+    sort -nr | while read timestamp filepath; do
+        local filename=$(basename "$filepath")
+        local filesize=$(du -h "$filepath" | cut -f1)
+        local filedate=$(date -d "@${timestamp}" '+%Y-%m-%d %H:%M')
+        
+        printf "   ${WHITE}%-35s${RESET} ${BLUE}%s${RESET} ${YELLOW}%s${RESET}\n" \
+               "$filename" "$filesize" "$filedate"
+        found=true
+    done
+    
+    if [[ $found == false ]]; then
+        print_color $YELLOW "   No backups found for $WORLD_NAME"
+    fi
+}
+
+# Function to restore backup
+restore_backup() {
+    local backup_file="$1"
+    
+    if [[ -z "$backup_file" ]]; then
+        print_color $RED "Usage: minecraft-backup restore <backup_filename>"
+        print_color $YELLOW "Available backups:"
+        list_backups
+        return 1
+    fi
+    
+    local backup_path="$BACKUP_DIR/$backup_file"
+    
+    if [[ ! -f "$backup_path" ]]; then
+        print_color $RED "❌ Backup file not found: $backup_path"
+        list_backups
+        return 1
+    fi
+    
+    # Check if current world exists
+    if [[ -d "$SOURCE_DIR" ]]; then
+        print_color $YELLOW "⚠️  Current world will be backed up before restore!"
+        
+        # Create automatic backup before restore
+        local restore_backup_name="${WORLD_NAME}_before_restore_$(date +"%Y%m%d_%H%M%S").zip"
+        local restore_backup_path="$BACKUP_DIR/$restore_backup_name"
+        
+        local parent_dir=$(dirname "$SOURCE_DIR")
+        local world_folder=$(basename "$SOURCE_DIR")
+        
+        cd "$parent_dir"
+        zip -r "$restore_backup_path" "$world_folder" -x "*.tmp" "*.lock" > /dev/null 2>&1
+        print_color $GREEN "✅ Current world backed up as: $restore_backup_name"
+        
+        # Remove current world
+        rm -rf "$SOURCE_DIR"
+    fi
+    
+    print_color $CYAN "🔄 Restoring backup: $backup_file"
+    
+    # Extract backup
+    local parent_dir=$(dirname "$SOURCE_DIR")
+    mkdir -p "$parent_dir"
+    
+    if cd "$parent_dir" && unzip -q "$backup_path"; then
+        print_color $GREEN "✅ Backup restored successfully!"
+        print_color $WHITE "   📁 Restored to: $SOURCE_DIR"
+    else
+        print_color $RED "❌ Failed to restore backup!"
+        return 1
+    fi
+}
+
+# Function to clean old backups
+clean_backups() {
+    local keep_days="$1"
+    
+    if [[ -z "$keep_days" || ! "$keep_days" =~ ^[0-9]+$ ]]; then
+        print_color $RED "Usage: minecraft-backup clean <days>"
+        print_color $YELLOW "Example: minecraft-backup clean 30  # Keep backups from last 30 days"
+        return 1
+    fi
+    
+    print_color $CYAN "🧹 Cleaning backups older than $keep_days days..."
+    
+    if [[ ! -d "$BACKUP_DIR" ]]; then
+        print_color $YELLOW "No backup directory found"
+        return 0
+    fi
+    
+    local deleted=0
+    find "$BACKUP_DIR" -name "${WORLD_NAME}_*.zip" -type f -mtime +$keep_days | while read file; do
+        local filename=$(basename "$file")
+        rm "$file"
+        print_color $YELLOW "   🗑️  Deleted: $filename"
+        deleted=$((deleted + 1))
+    done
+    
+    if [[ $deleted -eq 0 ]]; then
+        print_color $GREEN "✅ No old backups to clean"
+    else
+        print_color $GREEN "✅ Cleaned $deleted old backup(s)"
+    fi
+}
+
+# Function to show help
+show_help() {
+    print_color $CYAN "🎮 Minecraft Save Backup Tool"
+    echo
+    print_color $WHITE "Usage: minecraft-backup <command> [arguments]"
+    echo
+    print_color $YELLOW "Commands:"
+    print_color $WHITE "  backup [name]           - Create backup (optionally with custom name)"
+    print_color $WHITE "  list                    - List all backups"
+    print_color $WHITE "  restore <backup>        - Restore from backup"
+    print_color $WHITE "  clean <days>            - Remove backups older than X days"
+    print_color $WHITE "  help                    - Show this help"
+    echo
+    print_color $YELLOW "Examples:"
+    print_color $WHITE "  minecraft-backup backup                    # Regular backup"
+    print_color $WHITE "  minecraft-backup backup \"before-update\"    # Named backup"
+    print_color $WHITE "  minecraft-backup list                      # Show all backups"
+    print_color $WHITE "  minecraft-backup restore Skyblock_20241224_143022.zip"
+    print_color $WHITE "  minecraft-backup clean 30                  # Keep last 30 days"
+    echo
+    print_color $MAGENTA "Configuration:"
+    print_color $WHITE "  Source: $SOURCE_DIR"
+    print_color $WHITE "  Backup: $BACKUP_DIR"
+    print_color $WHITE "  World:  $WORLD_NAME"
+    echo
+    print_color $CYAN "💡 For automated backups, add to crontab:"
+    print_color $WHITE "  # Backup every 2 hours"
+    print_color $WHITE "  0 */2 * * * $HOME/bin/minecraft-backup backup >/dev/null 2>&1"
+    print_color $WHITE "  # Clean old backups weekly (keep 14 days)"
+    print_color $WHITE "  0 3 * * 0 $HOME/bin/minecraft-backup clean 14 >/dev/null 2>&1"
+}
+
+# Main script logic
+case "$1" in
+    backup|b)
+        create_backup "$2"
+        ;;
+    list|ls|l)
+        list_backups
+        ;;
+    restore|r)
+        restore_backup "$2"
+        ;;
+    clean|c)
+        clean_backups "$2"
+        ;;
+    help|--help|-h|"")
+        show_help
+        ;;
+    *)
+        print_color $RED "❌ Unknown command: $1"
+        echo
+        show_help
+        exit 1
+        ;;
+esac
