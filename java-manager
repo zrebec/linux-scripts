@@ -1,0 +1,231 @@
+#!/bin/bash
+# Java Manager Script
+# Place this in /usr/local/bin/java-manager and make it executable
+
+# Configuration
+JDK_BASE_DIR="/opt/java"
+SCRIPT_DIR="$(dirname "$0")"
+ENV_FILE="$HOME/.java-manager-env"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
+RESET='\033[0m'
+
+# Function to print colored output
+print_color() {
+    local color=$1
+    local message=$2
+    echo -e "${color}${message}${RESET}"
+}
+
+# Function to dynamically discover available JDK versions
+discover_jdk_versions() {
+    if [[ -d "$JDK_BASE_DIR" ]]; then
+        find "$JDK_BASE_DIR" -maxdepth 1 -type d -name "*jdk*" | sort
+    fi
+}
+
+# Function to extract version number from JDK directory name
+extract_jdk_version() {
+    local jdk_path="$1"
+    local dir_name=$(basename "$jdk_path")
+    
+    # Extract version number (handles formats like jdk-8, jdk-11.0.26, jdk-21.0.1, etc.)
+    if [[ "$dir_name" =~ jdk-?([0-9]+) ]]; then
+        echo "${BASH_REMATCH[1]}"
+    else
+        echo "unknown"
+    fi
+}
+
+# Function to list available JDK versions
+list_jdk_versions() {
+    print_color $CYAN "Available JDK versions:"
+    while IFS= read -r -d '' dir; do
+        local version=$(extract_jdk_version "$dir")
+        local current_marker=""
+        
+        # Mark current version
+        if [[ "$JAVA_HOME" == "$dir" ]]; then
+            current_marker=" ${GREEN}(current)${RESET}"
+        fi
+        
+        printf "  ${YELLOW}%-3s${RESET} -> ${WHITE}%s${RESET}%s\n" "$version" "$(basename "$dir")" "$current_marker"
+    done < <(discover_jdk_versions | tr '\n' '\0')
+}
+
+# Function to set JDK version
+use_jdk() {
+    local version="$1"
+    
+    if [[ -z "$version" ]]; then
+        print_color $RED "Usage: java-manager use <version>"
+        echo "Available versions:"
+        list_jdk_versions
+        return 1
+    fi
+    
+    local jdk_path=""
+    
+    # Find the JDK directory that matches the version
+    while IFS= read -r -d '' dir; do
+        local extracted_version=$(extract_jdk_version "$dir")
+        if [[ "$extracted_version" == "$version" ]]; then
+            jdk_path="$dir"
+            break
+        fi
+    done < <(discover_jdk_versions | tr '\n' '\0')
+    
+    if [[ -z "$jdk_path" ]]; then
+        print_color $RED "JDK version $version not found!"
+        echo "Available versions:"
+        list_jdk_versions
+        return 1
+    fi
+    
+    # Create environment file for sourcing
+    cat > "$ENV_FILE" << EOF
+export JAVA_HOME="$jdk_path"
+export PATH="$jdk_path/bin:\$PATH"
+EOF
+    
+    print_color $GREEN "✓ JDK $version configured!"
+    print_color $BLUE "  JAVA_HOME: $jdk_path"
+    print_color $YELLOW "To activate, run: source $ENV_FILE"
+    print_color $CYAN "Or add this to your shell profile:"
+    print_color $WHITE "  echo 'source $ENV_FILE' >> ~/.bashrc"
+    
+    # If we're being sourced, apply the changes immediately
+    if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+        export JAVA_HOME="$jdk_path"
+        export PATH="$jdk_path/bin:$PATH"
+        print_color $GREEN "✓ Environment updated for current session"
+        java -version 2>&1 | head -n1
+    fi
+}
+
+# Function to get current JDK info
+current_jdk() {
+    if [[ -n "$JAVA_HOME" ]]; then
+        print_color $CYAN "Current JDK:"
+        print_color $WHITE "  JAVA_HOME: $JAVA_HOME"
+        print_color $WHITE "  Version: $(java -version 2>&1 | head -n1)"
+    else
+        print_color $YELLOW "No JDK currently set in this session"
+        print_color $BLUE "System default:"
+        which java >/dev/null 2>&1 && java -version || print_color $RED "No Java found in PATH"
+    fi
+}
+
+# Function to run Java application with specific JDK
+run_with_jdk() {
+    local version="$1"
+    shift
+    
+    if [[ -z "$version" ]]; then
+        print_color $RED "Usage: java-manager run <jdk_version> <java_command>"
+        print_color $YELLOW "Example: java-manager run 11 -jar minecraft.jar"
+        return 1
+    fi
+    
+    local jdk_path=""
+    
+    # Find the JDK directory that matches the version
+    while IFS= read -r -d '' dir; do
+        local extracted_version=$(extract_jdk_version "$dir")
+        if [[ "$extracted_version" == "$version" ]]; then
+            jdk_path="$dir"
+            break
+        fi
+    done < <(discover_jdk_versions | tr '\n' '\0')
+    
+    if [[ -z "$jdk_path" ]]; then
+        print_color $RED "JDK version $version not found!"
+        list_jdk_versions
+        return 1
+    fi
+    
+    print_color $GREEN "Running with JDK $version:"
+    print_color $BLUE "  Command: $jdk_path/bin/java $@"
+    
+    # Run the Java command with the specified JDK
+    "$jdk_path/bin/java" "$@"
+}
+
+# Function to activate JDK for current shell
+activate_jdk() {
+    if [[ -f "$ENV_FILE" ]]; then
+        source "$ENV_FILE"
+        print_color $GREEN "✓ JDK environment activated"
+        current_jdk
+    else
+        print_color $RED "No JDK environment file found. Run 'java-manager use <version>' first."
+    fi
+}
+
+# Function to show help
+show_help() {
+    print_color $CYAN "Java Manager - Dynamic JDK Version Management"
+    echo
+    print_color $WHITE "Usage: java-manager <command> [arguments]"
+    echo
+    print_color $YELLOW "Commands:"
+    print_color $WHITE "  list                    - List all available JDK versions"
+    print_color $WHITE "  current                 - Show current JDK information"
+    print_color $WHITE "  use <version>           - Configure JDK version"
+    print_color $WHITE "  activate                - Activate configured JDK in current shell"
+    print_color $WHITE "  run <version> <args>    - Run Java command with specific JDK"
+    print_color $WHITE "  help                    - Show this help message"
+    echo
+    print_color $YELLOW "Examples:"
+    print_color $WHITE "  java-manager list"
+    print_color $WHITE "  java-manager use 17"
+    print_color $WHITE "  source java-manager use 17    # Sets for current session"
+    print_color $WHITE "  java-manager activate"
+    print_color $WHITE "  java-manager run 8 -jar minecraft-1.8.jar"
+    echo
+    print_color $YELLOW "Permanent Setup:"
+    print_color $WHITE "  java-manager use 17"
+    print_color $WHITE "  echo 'source ~/.java-manager-env' >> ~/.bashrc"
+    echo
+    print_color $MAGENTA "Note: Use 'source java-manager use <version>' for immediate activation"
+}
+
+# Main script logic
+case "$1" in
+    list|ls)
+        list_jdk_versions
+        ;;
+    current|cur)
+        current_jdk
+        ;;
+    use)
+        use_jdk "$2"
+        ;;
+    activate|act)
+        activate_jdk
+        ;;
+    run)
+        shift
+        run_with_jdk "$@"
+        ;;
+    help|--help|-h)
+        show_help
+        ;;
+    *)
+        if [[ -z "$1" ]]; then
+            show_help
+        else
+            print_color $RED "Unknown command: $1"
+            echo
+            show_help
+            exit 1
+        fi
+        ;;
+esac
