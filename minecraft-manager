@@ -1,0 +1,561 @@
+#!/bin/bash
+# Minecraft Manager Script
+# Advanced Minecraft instance management without official launcher
+
+# Configuration
+MINECRAFT_BASE_DIR="/home/zrebec/games/minecraft"
+INSTANCES_DIR="$MINECRAFT_BASE_DIR/instances"
+VERSIONS_DIR="$MINECRAFT_BASE_DIR/versions"
+ASSETS_DIR="$MINECRAFT_BASE_DIR/assets"
+LIBRARIES_DIR="$MINECRAFT_BASE_DIR/libraries"
+JDK_BASE_DIR="/opt/java"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
+RESET='\033[0m'
+
+print_color() {
+    local color=$1
+    local message=$2
+    echo -e "${color}${message}${RESET}"
+}
+
+# Create directory structure
+create_structure() {
+    print_color $CYAN "Creating Minecraft directory structure..."
+    mkdir -p "$INSTANCES_DIR"
+    mkdir -p "$VERSIONS_DIR"
+    mkdir -p "$ASSETS_DIR"
+    mkdir -p "$LIBRARIES_DIR"
+    print_color $GREEN "✓ Directory structure created"
+}
+
+# Function to find JDK path by version
+get_jdk_path() {
+    local version="$1"
+    if [[ -d "$JDK_BASE_DIR" ]]; then
+        find "$JDK_BASE_DIR" -maxdepth 1 -type d -name "*jdk*" | while read -r dir; do
+            if [[ "$(basename "$dir")" =~ jdk-?${version} ]]; then
+                echo "$dir"
+                return 0
+            fi
+        done
+    fi
+    return 1
+}
+
+# Function to create new Minecraft instance
+create_instance() {
+    local instance_name="$1"
+    local mc_version="$2"
+    local java_version="$3"
+    
+    if [[ -z "$instance_name" || -z "$mc_version" || -z "$java_version" ]]; then
+        print_color $RED "Usage: minecraft-manager create <instance_name> <minecraft_version> <java_version>"
+        print_color $YELLOW "Example: minecraft-manager create survival-1.19 1.19.4 17"
+        return 1
+    fi
+    
+    local instance_dir="$INSTANCES_DIR/$instance_name"
+    
+    if [[ -d "$instance_dir" ]]; then
+        print_color $RED "Instance '$instance_name' already exists!"
+        return 1
+    fi
+    
+    # Check if JDK exists
+    local jdk_path=$(get_jdk_path "$java_version")
+    if [[ -z "$jdk_path" ]]; then
+        print_color $RED "JDK version $java_version not found!"
+        return 1
+    fi
+    
+    print_color $CYAN "Creating instance: $instance_name"
+    print_color $BLUE "  Minecraft version: $mc_version"
+    print_color $BLUE "  Java version: $java_version"
+    print_color $BLUE "  JDK path: $jdk_path"
+    
+    # Create instance directory structure
+    mkdir -p "$instance_dir"/{saves,resourcepacks,screenshots,mods,config}
+    
+    # Create instance configuration
+    cat > "$instance_dir/instance.conf" << EOF
+# Minecraft Instance Configuration
+INSTANCE_NAME="$instance_name"
+MINECRAFT_VERSION="$mc_version"
+JAVA_VERSION="$java_version"
+JDK_PATH="$jdk_path"
+MEMORY_MIN="1G"
+MEMORY_MAX="4G"
+ADDITIONAL_ARGS=""
+CREATED_DATE="$(date)"
+EOF
+    
+    # Create launch script
+    cat > "$instance_dir/launch.sh" << 'EOF'
+#!/bin/bash
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+source "$SCRIPT_DIR/instance.conf"
+
+# Set the base directories
+MINECRAFT_BASE_DIR="/home/zrebec/games/minecraft"
+VERSIONS_DIR="$MINECRAFT_BASE_DIR/versions"
+ASSETS_DIR="$MINECRAFT_BASE_DIR/assets"
+
+echo "Launching $INSTANCE_NAME..."
+echo "Minecraft: $MINECRAFT_VERSION | Java: $JAVA_VERSION"
+
+# Use the configured JDK
+export JAVA_HOME="$JDK_PATH"
+export PATH="$JAVA_HOME/bin:$PATH"
+
+# Check if client jar exists
+CLIENT_JAR="$VERSIONS_DIR/$MINECRAFT_VERSION/$MINECRAFT_VERSION.jar"
+if [[ ! -f "$CLIENT_JAR" ]]; then
+    echo "Error: Client jar not found: $CLIENT_JAR"
+    echo "Please download it first using: minecraft-manager download $MINECRAFT_VERSION"
+    exit 1
+fi
+
+# Launch Minecraft
+cd "$SCRIPT_DIR"
+java -Xms$MEMORY_MIN -Xmx$MEMORY_MAX \
+     -Djava.library.path="$VERSIONS_DIR/$MINECRAFT_VERSION/natives" \
+     -Dminecraft.launcher.brand=custom \
+     -Dminecraft.launcher.version=1.0 \
+     -cp "$CLIENT_JAR" \
+     net.minecraft.client.main.Main \
+     --username Player \
+     --version $MINECRAFT_VERSION \
+     --gameDir "$SCRIPT_DIR" \
+     --assetsDir "$ASSETS_DIR" \
+     --assetIndex $MINECRAFT_VERSION \
+     $ADDITIONAL_ARGS
+EOF
+    
+    chmod +x "$instance_dir/launch.sh"
+    
+    print_color $GREEN "✓ Instance '$instance_name' created successfully!"
+    print_color $YELLOW "Next steps:"
+    print_color $WHITE "  1. Download Minecraft $mc_version: minecraft-manager download $mc_version"
+    print_color $WHITE "  2. Launch instance: minecraft-manager launch $instance_name"
+    print_color $WHITE "  3. Configure: minecraft-manager config $instance_name"
+}
+
+# Function to list instances
+list_instances() {
+    print_color $CYAN "Minecraft Instances:"
+    
+    if [[ ! -d "$INSTANCES_DIR" ]] || [[ -z "$(ls -A "$INSTANCES_DIR" 2>/dev/null)" ]]; then
+        print_color $YELLOW "  No instances found"
+        return 0
+    fi
+    
+    for instance_dir in "$INSTANCES_DIR"/*; do
+        if [[ -d "$instance_dir" ]]; then
+            local instance_name=$(basename "$instance_dir")
+            local config_file="$instance_dir/instance.conf"
+            
+            if [[ -f "$config_file" ]]; then
+                source "$config_file"
+                printf "  ${WHITE}%-20s${RESET} MC: ${YELLOW}%-10s${RESET} Java: ${GREEN}%-2s${RESET}\n" \
+                       "$instance_name" "$MINECRAFT_VERSION" "$JAVA_VERSION"
+            else
+                printf "  ${WHITE}%-20s${RESET} ${RED}(corrupted)${RESET}\n" "$instance_name"
+            fi
+        fi
+    done
+}
+
+# Function to launch instance
+launch_instance() {
+    local instance_name="$1"
+    
+    if [[ -z "$instance_name" ]]; then
+        print_color $RED "Usage: minecraft-manager launch <instance_name>"
+        list_instances
+        return 1
+    fi
+    
+    local instance_dir="$INSTANCES_DIR/$instance_name"
+    local launch_script="$instance_dir/launch.sh"
+    
+    if [[ ! -d "$instance_dir" ]]; then
+        print_color $RED "Instance '$instance_name' not found!"
+        list_instances
+        return 1
+    fi
+    
+    if [[ ! -f "$launch_script" ]]; then
+        print_color $RED "Launch script not found for instance '$instance_name'"
+        return 1
+    fi
+    
+    print_color $GREEN "Launching $instance_name..."
+    cd "$instance_dir"
+    bash "$launch_script"
+}
+
+# Function to download Minecraft version
+download_version() {
+    local version="$1"
+    
+    if [[ -z "$version" ]]; then
+        print_color $RED "Usage: minecraft-manager download <version>"
+        print_color $YELLOW "Example: minecraft-manager download 1.16.5"
+        return 1
+    fi
+    
+    local version_dir="$VERSIONS_DIR/$version"
+    mkdir -p "$version_dir"
+    
+    print_color $CYAN "Setting up Minecraft $version..."
+    print_color $YELLOW "Manual setup required - Here's what you need:"
+    echo
+    print_color $WHITE "📁 Required files in $version_dir/:"
+    print_color $WHITE "  • $version.jar (client)"
+    print_color $WHITE "  • $version.json (version manifest)"
+    print_color $WHITE "  • natives/ (platform-specific libraries)"
+    echo
+    print_color $WHITE "📁 Required in $LIBRARIES_DIR/:"
+    print_color $WHITE "  • All .jar dependencies (100+ files!)"
+    echo
+    print_color $WHITE "📁 Required in $ASSETS_DIR/:"
+    print_color $WHITE "  • assets/indexes/$version.json"
+    print_color $WHITE "  • assets/objects/ (game assets)"
+    echo
+    print_color $MAGENTA "🚨 IMPORTANT: Manual Minecraft setup is very complex!"
+    print_color $RED "   Minecraft has 100+ library dependencies with complex classpaths."
+    echo
+    print_color $CYAN "💡 EASIER ALTERNATIVES:"
+    print_color $WHITE "  1. Use Prism Launcher: sudo pacman -S prismlauncher"
+    print_color $WHITE "  2. Use MultiMC: yay -S multimc"
+    print_color $WHITE "  3. Copy from existing .minecraft installation"
+    print_color $WHITE "  4. Use official Minecraft Launcher first, then copy files"
+    echo
+    print_color $YELLOW "If you still want to do it manually:"
+    print_color $WHITE "  1. Download from: https://mcversions.net/"
+    print_color $WHITE "  2. Or copy from ~/.minecraft/versions/$version/"
+    print_color $WHITE "  3. Or use minecraft-launcher-lib to download all dependencies"
+    
+    # Create version manifest template
+    cat > "$version_dir/version.json" << EOF
+{
+  "id": "$version",
+  "type": "release",
+  "jar": "$version.jar",
+  "mainClass": "net.minecraft.client.main.Main",
+  "downloads": {
+    "client": {
+      "sha1": "",
+      "size": 0,
+      "url": ""
+    }
+  },
+  "libraries": [],
+  "assets": "$version"
+}
+EOF
+}
+
+# Function to copy from official launcher
+copy_from_official() {
+    local version="$1"
+    
+    if [[ -z "$version" ]]; then
+        print_color $RED "Usage: minecraft-manager copy <version>"
+        print_color $YELLOW "Example: minecraft-manager copy 1.16.5"
+        return 1
+    fi
+    
+    local official_dir="$HOME/.minecraft"
+    local our_version_dir="$VERSIONS_DIR/$version"
+    
+    if [[ ! -d "$official_dir" ]]; then
+        print_color $RED "Official Minecraft directory not found: $official_dir"
+        print_color $YELLOW "Install official Minecraft Launcher first!"
+        return 1
+    fi
+    
+    local official_version_dir="$official_dir/versions/$version"
+    if [[ ! -d "$official_version_dir" ]]; then
+        print_color $RED "Version $version not found in official launcher"
+        print_color $YELLOW "Launch $version in official launcher first!"
+        return 1
+    fi
+    
+    print_color $CYAN "Copying Minecraft $version from official launcher..."
+    
+    # Copy version files
+    mkdir -p "$our_version_dir"
+    cp -r "$official_version_dir"/* "$our_version_dir/"
+    
+    # Copy libraries
+    if [[ -d "$official_dir/libraries" ]]; then
+        print_color $BLUE "Copying libraries..."
+        cp -r "$official_dir/libraries"/* "$LIBRARIES_DIR/"
+    fi
+    
+    # Copy assets
+    if [[ -d "$official_dir/assets" ]]; then
+        print_color $BLUE "Copying assets..."
+        cp -r "$official_dir/assets"/* "$ASSETS_DIR/"
+    fi
+    
+    print_color $GREEN "✓ Successfully copied Minecraft $version from official launcher!"
+}
+
+# Function to copy from Prism Launcher
+copy_from_prism() {
+    local version="$1"
+    local instance_name="$2"
+    
+    if [[ -z "$version" ]]; then
+        print_color $RED "Usage: minecraft-manager copy-prism <version> [instance_name]"
+        print_color $YELLOW "Example: minecraft-manager copy-prism 1.16.5"
+        print_color $YELLOW "Example: minecraft-manager copy-prism 1.16.5 \"Vanilla 1.16.5\""
+        return 1
+    fi
+    
+    # Common Prism Launcher locations
+    local prism_dirs=(
+        "$HOME/.local/share/PrismLauncher"
+        "$HOME/.local/share/PolyMC"
+        "$HOME/.local/share/MultiMC"
+    )
+    
+    local prism_dir=""
+    for dir in "${prism_dirs[@]}"; do
+        if [[ -d "$dir" ]]; then
+            prism_dir="$dir"
+            break
+        fi
+    done
+    
+    if [[ -z "$prism_dir" ]]; then
+        print_color $RED "Prism Launcher data directory not found!"
+        print_color $YELLOW "Expected locations:"
+        for dir in "${prism_dirs[@]}"; do
+            print_color $WHITE "  $dir"
+        done
+        return 1
+    fi
+    
+    local libraries_dir="$prism_dir/libraries"
+    local assets_dir="$prism_dir/assets"
+    local our_version_dir="$VERSIONS_DIR/$version"
+    
+    # Find instance with the version
+    local instance_dir=""
+    if [[ -n "$instance_name" ]]; then
+        instance_dir="$prism_dir/instances/$instance_name"
+    else
+        # Find any instance with this version
+        for inst in "$prism_dir/instances"/*; do
+            if [[ -d "$inst" && -f "$inst/mmc-pack.json" ]]; then
+                local inst_version=$(grep -o '"version": "[^"]*"' "$inst/mmc-pack.json" | cut -d'"' -f4)
+                if [[ "$inst_version" == "$version" ]]; then
+                    instance_dir="$inst"
+                    break
+                fi
+            fi
+        done
+    fi
+    
+    if [[ ! -d "$instance_dir" ]]; then
+        print_color $RED "Instance with version $version not found in Prism Launcher!"
+        print_color $YELLOW "Available instances:"
+        for inst in "$prism_dir/instances"/*; do
+            if [[ -d "$inst" ]]; then
+                local name=$(basename "$inst")
+                local ver="unknown"
+                if [[ -f "$inst/mmc-pack.json" ]]; then
+                    ver=$(grep -o '"version": "[^"]*"' "$inst/mmc-pack.json" | cut -d'"' -f4 2>/dev/null || echo "unknown")
+                fi
+                print_color $WHITE "  $name (MC: $ver)"
+            fi
+        done
+        return 1
+    fi
+    
+    print_color $CYAN "Copying Minecraft $version from Prism Launcher..."
+    print_color $BLUE "  Prism dir: $prism_dir"
+    print_color $BLUE "  Instance: $(basename "$instance_dir")"
+    
+    # Copy version files (.minecraft/versions/X.X.X/)
+    mkdir -p "$our_version_dir"
+    if [[ -d "$instance_dir/.minecraft/versions/$version" ]]; then
+        cp -r "$instance_dir/.minecraft/versions/$version"/* "$our_version_dir/"
+        print_color $GREEN "✓ Copied version files"
+    else
+        print_color $YELLOW "⚠ Version files not found in instance"
+    fi
+    
+    # Copy libraries
+    if [[ -d "$libraries_dir" ]]; then
+        print_color $BLUE "Copying libraries..."
+        mkdir -p "$LIBRARIES_DIR"
+        cp -r "$libraries_dir"/* "$LIBRARIES_DIR/"
+        print_color $GREEN "✓ Copied libraries"
+    else
+        print_color $YELLOW "⚠ Libraries directory not found"
+    fi
+    
+    # Copy assets
+    if [[ -d "$assets_dir" ]]; then
+        print_color $BLUE "Copying assets..."
+        mkdir -p "$ASSETS_DIR"
+        cp -r "$assets_dir"/* "$ASSETS_DIR/"
+        print_color $GREEN "✓ Copied assets"
+    else
+        print_color $YELLOW "⚠ Assets directory not found"
+    fi
+    
+    print_color $GREEN "✓ Successfully copied Minecraft $version from Prism Launcher!"
+    print_color $BLUE "  Version files: $our_version_dir"
+    print_color $BLUE "  Libraries: $LIBRARIES_DIR"
+    print_color $BLUE "  Assets: $ASSETS_DIR"
+}
+
+# Function to configure instance
+configure_instance() {
+    local instance_name="$1"
+    
+    if [[ -z "$instance_name" ]]; then
+        print_color $RED "Usage: minecraft-manager config <instance_name>"
+        list_instances
+        return 1
+    fi
+    
+    local instance_dir="$INSTANCES_DIR/$instance_name"
+    local config_file="$instance_dir/instance.conf"
+    
+    if [[ ! -f "$config_file" ]]; then
+        print_color $RED "Instance '$instance_name' not found!"
+        return 1
+    fi
+    
+    print_color $CYAN "Opening configuration for: $instance_name"
+    ${EDITOR:-nano} "$config_file"
+}
+
+# Function to show instance info
+show_instance_info() {
+    local instance_name="$1"
+    
+    if [[ -z "$instance_name" ]]; then
+        print_color $RED "Usage: minecraft-manager info <instance_name>"
+        list_instances
+        return 1
+    fi
+    
+    local instance_dir="$INSTANCES_DIR/$instance_name"
+    local config_file="$instance_dir/instance.conf"
+    
+    if [[ ! -f "$config_file" ]]; then
+        print_color $RED "Instance '$instance_name' not found!"
+        return 1
+    fi
+    
+    source "$config_file"
+    
+    print_color $CYAN "Instance Information: $instance_name"
+    print_color $WHITE "  Minecraft Version: $MINECRAFT_VERSION"
+    print_color $WHITE "  Java Version: $JAVA_VERSION"
+    print_color $WHITE "  JDK Path: $JDK_PATH"
+    print_color $WHITE "  Memory: $MEMORY_MIN - $MEMORY_MAX"
+    print_color $WHITE "  Created: $CREATED_DATE"
+    print_color $WHITE "  Location: $instance_dir"
+    
+    # Check if client jar exists
+    local client_jar="$VERSIONS_DIR/$MINECRAFT_VERSION/$MINECRAFT_VERSION.jar"
+    if [[ -f "$client_jar" ]]; then
+        print_color $GREEN "  Client JAR: ✓ Found"
+    else
+        print_color $RED "  Client JAR: ✗ Missing ($client_jar)"
+    fi
+}
+
+# Function to show help
+show_help() {
+    print_color $CYAN "Minecraft Manager - Manual Minecraft Instance Management"
+    echo
+    print_color $WHITE "Usage: minecraft-manager <command> [arguments]"
+    echo
+    print_color $YELLOW "Commands:"
+    print_color $WHITE "  init                              - Initialize directory structure"
+    print_color $WHITE "  create <name> <mc_ver> <java>    - Create new instance"
+    print_color $WHITE "  list                              - List all instances"
+    print_color $WHITE "  launch <name>                     - Launch instance"
+    print_color $WHITE "  download <version>                - Setup Minecraft version (manual)"
+    print_color $WHITE "  copy <version>                    - Copy from official launcher"
+    print_color $WHITE "  copy-prism <ver> [name]           - Copy from Prism Launcher"
+    print_color $WHITE "  config <name>                     - Configure instance"
+    print_color $WHITE "  info <name>                       - Show instance information"
+    print_color $WHITE "  help                              - Show this help"
+    echo
+    print_color $YELLOW "Examples:"
+    print_color $WHITE "  minecraft-manager init"
+    print_color $WHITE "  minecraft-manager create survival-1.19 1.19.4 17"
+    print_color $WHITE "  minecraft-manager create oldschool-1.8 1.8.9 8"
+    print_color $WHITE "  minecraft-manager copy 1.16.5"
+    print_color $WHITE "  minecraft-manager copy-prism 1.16.5"
+    print_color $WHITE "  minecraft-manager info survival-1.16"
+    print_color $WHITE "  minecraft-manager launch survival-1.19"
+    echo
+    print_color $MAGENTA "Directory structure:"
+    print_color $WHITE "  $INSTANCES_DIR/   - Your game instances"
+    print_color $WHITE "  $VERSIONS_DIR/    - Downloaded MC versions"
+    print_color $WHITE "  $ASSETS_DIR/      - Game assets"
+    print_color $WHITE "  $LIBRARIES_DIR/   - Game libraries"
+}
+
+# Main script logic
+case "$1" in
+    init)
+        create_structure
+        ;;
+    create)
+        create_instance "$2" "$3" "$4"
+        ;;
+    list|ls)
+        list_instances
+        ;;
+    launch|run)
+        launch_instance "$2"
+        ;;
+    download|dl)
+        download_version "$2"
+        ;;
+    copy)
+        copy_from_official "$2"
+        ;;
+    copy-prism)
+        copy_from_prism "$2" "$3"
+        ;;
+    config|cfg)
+        configure_instance "$2"
+        ;;
+    info)
+        show_instance_info "$2"
+        ;;
+    help|--help|-h)
+        show_help
+        ;;
+    *)
+        if [[ -z "$1" ]]; then
+            show_help
+        else
+            print_color $RED "Unknown command: $1"
+            echo
+            show_help
+            exit 1
+        fi
+        ;;
+esac
