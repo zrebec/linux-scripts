@@ -13,6 +13,7 @@
 
 START_HOUR=22          # 🌅 Start reducing blue light at 22:00 (10:00 PM)
 END_HOUR=1             # 🌙 Finish reduction at 01:00 (1:00 AM next day)
+MORNING_HOUR=6         # 🌅 Return to normal colors at 06:00 (6:00 AM)
 START_TEMP=6500        # ☀️ Normal daylight temperature in Kelvin (cool white)
 END_TEMP=1800          # 🔥 Warm night temperature in Kelvin (very warm)
 NORMAL_TEMP=6500       # 🌞 Default temperature during day hours
@@ -178,6 +179,7 @@ calculate_temperature() {
     local current_decimal=$1
     local start_decimal=$START_HOUR
     local end_decimal=$END_HOUR
+    local morning_decimal=$MORNING_HOUR
     
     # Determine the starting temperature
     local effective_start_temp=$START_TEMP
@@ -196,27 +198,34 @@ calculate_temperature() {
         fi
     fi
     
-    # Handle midnight crossing (e.g., 22:00 to 01:00 next day)
-    if (( $(echo "$END_HOUR < $START_HOUR" | bc -l) )); then
-        if (( $(echo "$current_decimal >= $start_decimal" | bc -l) )); then
-            # After start time (22:00-23:59)
+    # Enhanced logic for night period with three phases:
+    # Phase 1: START_HOUR to END_HOUR (filtering down)
+    # Phase 2: END_HOUR to MORNING_HOUR (stay at minimum)
+    # Phase 3: MORNING_HOUR onwards (normal daylight)
+    
+    # Handle midnight crossing scenarios
+    if (( $(echo "$current_decimal >= $start_decimal" | bc -l) )); then
+        # Evening: 22:00-23:59
+        if (( $(echo "$current_decimal <= $end_decimal + 24" | bc -l) )); then
+            # Phase 1: Active filtering (22:00 to 01:00)
             local progress=$(echo "scale=3; ($current_decimal - $start_decimal) / (24 - $start_decimal + $end_decimal)" | bc)
-        elif (( $(echo "$current_decimal <= $end_decimal" | bc -l) )); then
-            # Before end time (00:00-01:00)
-            local progress=$(echo "scale=3; (24 - $start_decimal + $current_decimal) / (24 - $start_decimal + $end_decimal)" | bc)
         else
-            # Outside filter time - return normal temperature
+            # Should not happen in this branch
+            print_color $GRAY "   • ADAPTIVE_START (currently: $ADAPTIVE_START)"
             echo $NORMAL_TEMP
             return
         fi
+    elif (( $(echo "$current_decimal <= $end_decimal" | bc -l) )); then
+        # Early morning: 00:00-01:00 (still filtering)
+        local progress=$(echo "scale=3; (24 - $start_decimal + $current_decimal) / (24 - $start_decimal + $end_decimal)" | bc)
+    elif (( $(echo "$current_decimal > $end_decimal && $current_decimal < $morning_decimal" | bc -l) )); then
+        # Phase 2: Deep night (01:00-06:00) - stay at minimum temperature
+        echo $END_TEMP
+        return
     else
-        # Normal case (no midnight crossing)
-        if (( $(echo "$current_decimal >= $start_decimal" | bc -l) )) && (( $(echo "$current_decimal <= $end_decimal" | bc -l) )); then
-            local progress=$(echo "scale=3; ($current_decimal - $start_decimal) / ($end_decimal - $start_decimal)" | bc)
-        else
-            echo $NORMAL_TEMP
-            return
-        fi
+        # Phase 3: Day time (06:00-22:00) - normal daylight
+        echo $NORMAL_TEMP
+        return
     fi
     
     # Ensure progress is between 0 and 1
@@ -296,7 +305,9 @@ show_status() {
     # Time information section
     print_color $CYAN "🕐 TIME INFORMATION:"
     print_color $WHITE "   Current time: $current_time ($current_date)"
-    print_color $WHITE "   Filter period: $(printf "%02d:00" $START_HOUR) → $(printf "%02d:00" $END_HOUR)"
+    print_color $WHITE "   Filter period: $(printf "%02d:00" $START_HOUR) → $(printf "%02d:00" $END_HOUR) (active filtering)"
+    print_color $WHITE "   Night period: $(printf "%02d:00" $END_HOUR) → $(printf "%02d:00" $MORNING_HOUR) (stay warm)"
+    print_color $WHITE "   Day period: $(printf "%02d:00" $MORNING_HOUR) → $(printf "%02d:00" $START_HOUR) (normal light)"
     print_color $WHITE "   Temperature range: ${START_TEMP}K (cool) → ${END_TEMP}K (warm)"
     echo
     
@@ -308,6 +319,10 @@ show_status() {
         print_status "info" "Filter is INACTIVE - Normal daylight mode 🌞"
         print_color $GRAY "   Your eyes are exposed to full spectrum light"
         print_color $GRAY "   Perfect for daytime productivity and alertness"
+    elif (( $(echo "$temp == $END_TEMP" | bc -l) )); then
+        print_status "success" "Filter is at MAXIMUM - Deep night mode 🌙"
+        print_color $GRAY "   Maximum blue light filtering active"
+        print_color $GRAY "   Perfect for deep sleep preparation"
     else
         local progress_percent=$(echo "scale=1; ($START_TEMP - $temp) * 100 / ($START_TEMP - $END_TEMP)" | bc)
         print_status "success" "Filter is ACTIVE - ${progress_percent}% towards night mode 🌙"
@@ -555,7 +570,8 @@ show_help() {
     print_color $YELLOW "⏰ DEFAULT SCHEDULE:"
     print_color $WHITE "   🌅 $(printf "%02d:00" $START_HOUR) - Filter activation begins"
     print_color $WHITE "   🌙 $(printf "%02d:00" $END_HOUR) - Maximum warmth reached"
-    print_color $WHITE "   🌞 Other times - Normal daylight colors"
+    print_color $WHITE "   😴 $(printf "%02d:00" $END_HOUR) - $(printf "%02d:00" $MORNING_HOUR) - Stay at warm temperature"
+    print_color $WHITE "   🌞 $(printf "%02d:00" $MORNING_HOUR) - Return to normal daylight colors"
     echo
     
     print_color $YELLOW "💻 COMMAND USAGE:"
@@ -824,7 +840,7 @@ main() {
             print_color $GRAY "   • END_HOUR (currently: $END_HOUR)"
             print_color $GRAY "   • START_TEMP (currently: ${START_TEMP}K)"
             print_color $GRAY "   • END_TEMP (currently: ${END_TEMP}K)"
-            print_color $GRAY "   • ADAPTIVE_START (currently: $ADAPTIVE_START)"
+            print_color $GRAY "   • MORNING_HOUR (currently: $MORNING_HOUR)"
             echo
             
             if command -v nano >/dev/null 2>&1; then
