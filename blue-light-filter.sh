@@ -14,8 +14,9 @@
 START_HOUR=22          # 🌅 Start reducing blue light at 22:00 (10:00 PM)
 END_HOUR=1             # 🌙 Finish reduction at 01:00 (1:00 AM next day)
 START_TEMP=6500        # ☀️ Normal daylight temperature in Kelvin (cool white)
-END_TEMP=2700          # 🔥 Warm night temperature in Kelvin (candle-like)
+END_TEMP=1800          # 🔥 Warm night temperature in Kelvin (very warm)
 NORMAL_TEMP=6500       # 🌞 Default temperature during day hours
+ADAPTIVE_START=true    # 🎯 Start from current temperature instead of START_TEMP
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🎨 COLOR PALETTE FOR BEAUTIFUL OUTPUT
@@ -58,17 +59,33 @@ print_separator() {
     print_color $GRAY "────────────────────────────────────────────────────────────────────────────────"
 }
 
-# Print status indicator
-print_status() {
-    local status=$1
-    local message=$2
-    case $status in
-        "success") print_color $GREEN "✅ $message" ;;
-        "error")   print_color $RED "❌ $message" ;;
-        "warning") print_color $YELLOW "⚠️  $message" ;;
-        "info")    print_color $BLUE "ℹ️  $message" ;;
-        "tip")     print_color $MAGENTA "💡 $message" ;;
-    esac
+# Get current color temperature from system
+get_current_temperature() {
+    local current_temp=$NORMAL_TEMP  # Default fallback
+    
+    # Try to get current temperature from GNOME
+    if command -v gsettings >/dev/null 2>&1; then
+        if [[ "$XDG_CURRENT_DESKTOP" == *"GNOME"* ]]; then
+            local gnome_temp=$(gsettings get org.gnome.settings-daemon.plugins.color night-light-temperature 2>/dev/null)
+            if [[ "$gnome_temp" =~ ^[0-9]+$ ]]; then
+                current_temp=$gnome_temp
+            fi
+        elif [[ "$XDG_CURRENT_DESKTOP" == *"Cinnamon"* ]] || [[ "$XDG_CURRENT_DESKTOP" == *"X-Cinnamon"* ]]; then
+            if command -v dconf >/dev/null 2>&1; then
+                local cinnamon_temp=$(dconf read /org/cinnamon/settings-daemon/plugins/color/night-light-temperature 2>/dev/null)
+                if [[ "$cinnamon_temp" =~ ^uint32[[:space:]]+([0-9]+)$ ]]; then
+                    current_temp=${BASH_REMATCH[1]}
+                fi
+            fi
+        fi
+    fi
+    
+    # Ensure temperature is within reasonable bounds
+    if (( $(echo "$current_temp < 1000" | bc -l) )) || (( $(echo "$current_temp > 10000" | bc -l) )); then
+        current_temp=$NORMAL_TEMP
+    fi
+    
+    echo $current_temp
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -102,9 +119,25 @@ set_color_temp() {
     
     # Try GNOME settings first (most common on modern Linux)
     if command -v gsettings >/dev/null 2>&1; then
-        gsettings set org.gnome.settings-daemon.plugins.color night-light-enabled true 2>/dev/null
-        gsettings set org.gnome.settings-daemon.plugins.color night-light-temperature $temp 2>/dev/null
-        method_used="GNOME Night Light"
+        # Check if we're in GNOME
+        if [[ "$XDG_CURRENT_DESKTOP" == *"GNOME"* ]]; then
+            gsettings set org.gnome.settings-daemon.plugins.color night-light-enabled true 2>/dev/null
+            gsettings set org.gnome.settings-daemon.plugins.color night-light-temperature $temp 2>/dev/null
+            method_used="GNOME Night Light"
+        # Check if we're in Cinnamon
+        elif [[ "$XDG_CURRENT_DESKTOP" == *"Cinnamon"* ]] || [[ "$XDG_CURRENT_DESKTOP" == *"X-Cinnamon"* ]]; then
+            # Cinnamon uses different dconf paths
+            if command -v dconf >/dev/null 2>&1; then
+                dconf write /org/cinnamon/settings-daemon/plugins/color/night-light-enabled true 2>/dev/null
+                dconf write /org/cinnamon/settings-daemon/plugins/color/night-light-temperature "uint32 $temp" 2>/dev/null
+                method_used="Cinnamon Night Light"
+            fi
+        else
+            # Try GNOME anyway (might work on some setups)
+            gsettings set org.gnome.settings-daemon.plugins.color night-light-enabled true 2>/dev/null
+            gsettings set org.gnome.settings-daemon.plugins.color night-light-temperature $temp 2>/dev/null
+            method_used="GNOME Night Light"
+        fi
     fi
     
     # Try Redshift (popular independent tool)
@@ -127,11 +160,41 @@ set_color_temp() {
     fi
 }
 
+# Print status indicator
+print_status() {
+    local status=$1
+    local message=$2
+    case $status in
+        "success") print_color $GREEN "✅ $message" ;;
+        "error")   print_color $RED "❌ $message" ;;
+        "warning") print_color $YELLOW "⚠️  $message" ;;
+        "info")    print_color $BLUE "ℹ️  $message" ;;
+        "tip")     print_color $MAGENTA "💡 $message" ;;
+    esac
+}
+
 # Calculate appropriate temperature based on current time
 calculate_temperature() {
     local current_decimal=$1
     local start_decimal=$START_HOUR
     local end_decimal=$END_HOUR
+    
+    # Determine the starting temperature
+    local effective_start_temp=$START_TEMP
+    if [[ "$ADAPTIVE_START" == "true" ]]; then
+        # Get current temperature from system when filter period begins
+        local current_time_hour=$(echo "$current_decimal" | cut -d. -f1)
+        
+        # If we're at the start of filter period, use current system temperature
+        if (( $(echo "$current_decimal >= $start_decimal - 0.1 && $current_decimal <= $start_decimal + 0.1" | bc -l) )); then
+            effective_start_temp=$(get_current_temperature)
+            print_color $BLUE "🎯 Adaptive start: Beginning from current ${effective_start_temp}K"
+        else
+            # During filter period, calculate what the start temp should have been
+            # This maintains smooth progression even if script starts mid-period
+            effective_start_temp=$START_TEMP
+        fi
+    fi
     
     # Handle midnight crossing (e.g., 22:00 to 01:00 next day)
     if (( $(echo "$END_HOUR < $START_HOUR" | bc -l) )); then
@@ -165,8 +228,8 @@ calculate_temperature() {
     
     # Calculate temperature using smooth cosine curve for natural transition
     local smooth_progress=$(echo "scale=3; (1 - c(3.14159 * $progress)) / 2" | bc -l)
-    local temp_diff=$(echo "$START_TEMP - $END_TEMP" | bc)
-    local calculated_temp=$(echo "scale=0; $START_TEMP - $temp_diff * $smooth_progress" | bc)
+    local temp_diff=$(echo "$effective_start_temp - $END_TEMP" | bc)
+    local calculated_temp=$(echo "scale=0; $effective_start_temp - $temp_diff * $smooth_progress" | bc)
     
     # Ensure we return an integer temperature value
     calculated_temp=${calculated_temp%.*}
@@ -184,10 +247,20 @@ reset_filter() {
     print_color $BLUE "🔄 Restoring normal daylight temperature (${NORMAL_TEMP}K)..."
     set_color_temp $NORMAL_TEMP
     
-    # Disable night light in GNOME
+    # Disable night light in GNOME/Cinnamon
     if command -v gsettings >/dev/null 2>&1; then
-        gsettings set org.gnome.settings-daemon.plugins.color night-light-enabled false 2>/dev/null
-        print_status "info" "GNOME Night Light disabled"
+        if [[ "$XDG_CURRENT_DESKTOP" == *"GNOME"* ]]; then
+            gsettings set org.gnome.settings-daemon.plugins.color night-light-enabled false 2>/dev/null
+            print_status "info" "GNOME Night Light disabled"
+        elif [[ "$XDG_CURRENT_DESKTOP" == *"Cinnamon"* ]] || [[ "$XDG_CURRENT_DESKTOP" == *"X-Cinnamon"* ]]; then
+            if command -v dconf >/dev/null 2>&1; then
+                dconf write /org/cinnamon/settings-daemon/plugins/color/night-light-enabled false 2>/dev/null
+                print_status "info" "Cinnamon Night Light disabled"
+            fi
+        else
+            gsettings set org.gnome.settings-daemon.plugins.color night-light-enabled false 2>/dev/null
+            print_status "info" "Night Light disabled"
+        fi
     fi
     
     # Reset Redshift
@@ -507,6 +580,7 @@ show_help() {
     print_color $YELLOW "🔧 SYSTEM REQUIREMENTS:"
     print_color $WHITE "   • 🐧 Linux with one of the following:"
     print_color $GRAY "     - GNOME Desktop Environment (built-in support)"
+    print_color $GRAY "     - Cinnamon Desktop Environment (built-in support)"
     print_color $GRAY "     - Redshift: sudo pacman -S redshift"
     print_color $GRAY "     - Gammastep: sudo pacman -S gammastep (Wayland)"
     print_color $WHITE "   • 🧮 bc calculator: sudo pacman -S bc"
@@ -525,7 +599,8 @@ show_help() {
     print_color $GRAY "   • START_HOUR: When filtering begins (default: 22)"
     print_color $GRAY "   • END_HOUR: When maximum warmth is reached (default: 1)"
     print_color $GRAY "   • START_TEMP: Daylight temperature in Kelvin (default: 6500K)"
-    print_color $GRAY "   • END_TEMP: Warm night temperature in Kelvin (default: 2700K)"
+    print_color $GRAY "   • END_TEMP: Warm night temperature in Kelvin (default: 1800K)"
+    print_color $GRAY "   • ADAPTIVE_START: Start from current temp (default: true)"
     echo
     
     print_color $YELLOW "🐛 TROUBLESHOOTING:"
@@ -565,18 +640,40 @@ test_tools() {
     local test_temp=4000
     local tools_working=0
     
-    # Test GNOME gsettings
-    print_color $CYAN "🟣 GNOME Night Light (gsettings):"
+    # Test GNOME/Cinnamon gsettings
+    print_color $CYAN "🟣 Desktop Environment Night Light:"
     if command -v gsettings >/dev/null 2>&1; then
-        if gsettings set org.gnome.settings-daemon.plugins.color night-light-temperature $test_temp 2>/dev/null; then
-            print_status "success" "Working perfectly!"
-            gsettings set org.gnome.settings-daemon.plugins.color night-light-enabled true 2>/dev/null
-            tools_working=$((tools_working + 1))
+        if [[ "$XDG_CURRENT_DESKTOP" == *"GNOME"* ]]; then
+            if gsettings set org.gnome.settings-daemon.plugins.color night-light-temperature $test_temp 2>/dev/null; then
+                print_status "success" "GNOME Night Light working perfectly!"
+                gsettings set org.gnome.settings-daemon.plugins.color night-light-enabled true 2>/dev/null
+                tools_working=$((tools_working + 1))
+            else
+                print_status "warning" "GNOME detected but Night Light not responding"
+            fi
+        elif [[ "$XDG_CURRENT_DESKTOP" == *"Cinnamon"* ]] || [[ "$XDG_CURRENT_DESKTOP" == *"X-Cinnamon"* ]]; then
+            if command -v dconf >/dev/null 2>&1; then
+                if dconf write /org/cinnamon/settings-daemon/plugins/color/night-light-temperature "uint32 $test_temp" 2>/dev/null; then
+                    print_status "success" "Cinnamon Night Light working perfectly!"
+                    dconf write /org/cinnamon/settings-daemon/plugins/color/night-light-enabled true 2>/dev/null
+                    tools_working=$((tools_working + 1))
+                else
+                    print_status "warning" "Cinnamon detected but Night Light not responding"
+                fi
+            else
+                print_status "error" "Cinnamon detected but dconf not available"
+            fi
         else
-            print_status "warning" "Installed but not responding (maybe not GNOME?)"
+            print_status "info" "Desktop: $XDG_CURRENT_DESKTOP (trying generic approach)"
+            if gsettings set org.gnome.settings-daemon.plugins.color night-light-temperature $test_temp 2>/dev/null; then
+                print_status "success" "Generic Night Light working!"
+                tools_working=$((tools_working + 1))
+            else
+                print_status "warning" "Generic approach failed"
+            fi
         fi
     else
-        print_status "error" "Not installed"
+        print_status "error" "gsettings not available"
     fi
     echo
     
@@ -727,6 +824,7 @@ main() {
             print_color $GRAY "   • END_HOUR (currently: $END_HOUR)"
             print_color $GRAY "   • START_TEMP (currently: ${START_TEMP}K)"
             print_color $GRAY "   • END_TEMP (currently: ${END_TEMP}K)"
+            print_color $GRAY "   • ADAPTIVE_START (currently: $ADAPTIVE_START)"
             echo
             
             if command -v nano >/dev/null 2>&1; then
